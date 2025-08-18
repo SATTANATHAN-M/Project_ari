@@ -1,125 +1,65 @@
-// const puppeteer = require('puppeteer-extra');
-// const StealthPlugin = require('puppeteer-extra-plugin-stealth');
-// puppeteer.use(StealthPlugin());
-// async function crawl(url) {
-//   const browser = await puppeteer.launch({ headless: true });
-//   const page = await browser.newPage();
+// server/index.js
+// ================================================
+// Backend: Crawls a website, runs axe-core checks,
+// and serves results to the frontend.
+// ================================================
 
-//   await page.goto(url, { waitUntil: 'domcontentloaded' });
+import express from "express";
+import cors from "cors";
+import puppeteer from "puppeteer";
+import AxePuppeteer from "@axe-core/puppeteer";
 
-//   const title = await page.title();
-//   const links = await page.$$eval('a', anchors => anchors.map(a => a.href));
+const app = express();
+app.use(cors());
+app.use(express.json());
 
-//   await browser.close();
+/**
+ * Utility function: Run axe-core on a single page
+ */
+async function analyzePage(page, url) {
+  const results = await new AxePuppeteer(page).analyze();
 
-//   return { title, links };
-// }
-
-// module.exports = crawl;
-// crawler.js
-// crawler.js
-// crawler.js
-const { Cluster } = require("puppeteer-cluster");
-const puppeteer = require("puppeteer-extra");
-const StealthPlugin = require("puppeteer-extra-plugin-stealth");
-const { AxePuppeteer } = require("@axe-core/puppeteer");
-
-puppeteer.use(StealthPlugin());
-
-// keep only internal links of the same host, and normalize them
-function getInternalLinks(baseUrl, links) {
-  const baseHost = new URL(baseUrl).hostname;
-  return links
-    .map((link) => {
-      try { return new URL(link, baseUrl).href; } catch { return null; }
-    })
-    .filter((href) => href && new URL(href).hostname === baseHost);
+  return {
+    url,
+    issues: results.violations.map((v) => ({
+      id: v.id,
+      impact: v.impact,
+      description: v.description,
+      helpUrl: v.helpUrl,
+      nodes: v.nodes.map((n) => n.html),
+    })),
+  };
 }
 
-async function startCrawler(startUrl, maxDepth = 2, maxPages = 100, concurrency = 4) {
-  const visited = new Set();
-  const results = [];
-  let pagesCrawled = 0;
+/**
+ * POST /crawl
+ * Body: { url: "https://example.com" }
+ */
+app.post("/crawl", async (req, res) => {
+  const { url } = req.body;
 
-  const cluster = await Cluster.launch({
-    puppeteer,
-    concurrency: Cluster.CONCURRENCY_CONTEXT, // fast + isolated contexts
-    maxConcurrency: concurrency,
-    timeout: 60 * 1000,
-    puppeteerOptions: { headless: true, args: ["--no-sandbox"] },
-  });
+  if (!url) return res.status(400).json({ error: "URL is required" });
 
-  await cluster.task(async ({ page, data }) => {
-    const { url, depth } = data;
+  let browser;
+  try {
+    browser = await puppeteer.launch({ headless: true });
+    const page = await browser.newPage();
 
-    if (visited.has(url) || depth > maxDepth || pagesCrawled >= maxPages) return;
-    visited.add(url);
-    pagesCrawled++;
+    console.log(`🔍 Crawling: ${url}`);
+    await page.goto(url, { waitUntil: "networkidle2", timeout: 60000 });
 
-    try {
-      await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
+    // Run accessibility check
+    const report = await analyzePage(page, url);
 
-      const title = await page.title();
+    res.json(report);
+  } catch (err) {
+    console.error("❌ Error:", err.message);
+    res.status(500).json({ error: err.message });
+  } finally {
+    if (browser) await browser.close();
+  }
+});
 
-      // collect links on page
-      const hrefs = await page.$$eval("a[href]", (as) => as.map((a) => a.getAttribute("href")));
-      const internalLinks = getInternalLinks(url, hrefs);
-
-      // queue deeper links
-      if (depth < maxDepth) {
-        for (const next of internalLinks) {
-          if (!visited.has(next) && pagesCrawled < maxPages) {
-            cluster.queue({ url: next, depth: depth + 1 });
-          }
-        }
-      }
-
-      // run axe-core
-      const axe = new AxePuppeteer(page);
-      const axeResults = await axe.analyze();
-
-      // trim the payload to essentials for UI
-      const violations = axeResults.violations.map((v) => ({
-        id: v.id,
-        impact: v.impact,
-        description: v.description,
-        helpUrl: v.helpUrl,
-        nodes: v.nodes.slice(0, 5).map((n) => ({
-          target: n.target,
-          html: n.html,
-          failureSummary: n.failureSummary,
-        })),
-      }));
-
-      results.push({
-        url,
-        depth,
-        title,
-        links: internalLinks,
-        counts: {
-          violations: axeResults.violations.length,
-          passes: axeResults.passes?.length || 0,
-          incomplete: axeResults.incomplete?.length || 0,
-          inapplicable: axeResults.inapplicable?.length || 0,
-        },
-        violations,
-      });
-
-      console.log(`✅ ${url} (d=${depth}) → ${violations.length} violations`);
-    } catch (err) {
-      console.error(`❌ ${url}:`, err.message);
-      results.push({ url, depth, title: null, links: [], error: err.message, counts: { violations: 0 } });
-    }
-  });
-
-  cluster.queue({ url: startUrl, depth: 0 });
-
-  await cluster.idle();
-  await cluster.close();
-
-  return results;
-}
-
-module.exports = { startCrawler };
-
-
+// Start server
+const PORT = 5000;
+app.listen(PORT, () => console.log(`✅ Server running at http://localhost:${PORT}`));

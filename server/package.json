@@ -7,16 +7,17 @@
     "test": "echo \"Error: no test specified\" && exit 1",
     "dev": "node index.js"
   },
+  "type": "module",
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "type": "commonjs",
   "dependencies": {
     "@axe-core/puppeteer": "^4.10.2",
     "cheerio": "^1.1.2",
     "cors": "^2.8.5",
     "express": "^5.1.0",
-    "puppeteer": "^24.16.0",
+    "nodemon": "^3.1.10",
+    "puppeteer": "^24.16.2",
     "puppeteer-cluster": "^0.24.0",
     "puppeteer-extra": "^3.3.6",
     "puppeteer-extra-plugin-stealth": "^2.11.2"

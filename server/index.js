@@ -1,32 +1,37 @@
-// index.js
 const express = require("express");
 const cors = require("cors");
+const path = require("path");
 const { startCrawler } = require("./crawler");
+const { computeOverallScore } = require("./scoring");
+const { generatePDFReport } = require("./report");
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-app.post("/api/crawl", async (req, res) => {
-  const {
-    url,
-    maxDepth = 2,
-    maxPages = 100,
-    concurrency = 4,
-  } = req.body || {};
+// Serve reports folder
+app.use("/reports", express.static(path.join(__dirname, "reports")));
 
+app.post("/api/crawl", async (req, res) => {
+  const { url, concurrency = 4 } = req.body || {};
   if (!url) return res.status(400).json({ error: "URL is required" });
 
   try {
-    const result = await startCrawler(url, Number(maxDepth), Number(maxPages), Number(concurrency));
-    res.json(result); // array of page results
+    const pages = await startCrawler(url, Number(concurrency));
+    const score = computeOverallScore(pages);
+    const pdfPath = path.join(__dirname, "reports", `report_${Date.now()}.pdf`);
+
+    try {
+      await generatePDFReport(pages, pdfPath);
+    } catch (pdfErr) {
+      console.error("PDF generation failed:", pdfErr);
+    }
+
+    res.json({ pages, score, pdfPath: `/reports/${path.basename(pdfPath)}` });
   } catch (err) {
-    console.error("Crawl error:", err);
-    res.status(500).json({ error: "Failed to crawl" });
+    console.error(err);
+    res.status(500).json({ error: err.message || "Failed to crawl" });
   }
 });
 
-const PORT = 3001;
-app.listen(PORT, () => {
-  console.log(`Server listening on http://localhost:${PORT}`);
-});
+app.listen(3001, () => console.log("Server running on http://localhost:3001"));

@@ -1,3 +1,4 @@
+// client/src/components/CrawlForm.jsx
 export default function CrawlForm({ url, setUrl, handleCrawl, loading }) {
   return (
     <div style={{ display: "flex", gap: "0.5rem", marginBottom: "1rem" }}>
@@ -13,7 +14,7 @@ export default function CrawlForm({ url, setUrl, handleCrawl, loading }) {
         disabled={loading}
         style={{ padding: "0.5rem 1rem" }}
       >
-        {loading ? "Scanning..." : "Crawl"}
+        {loading ? "Auditing..." : "Audit"}
       </button>
     </div>
   );

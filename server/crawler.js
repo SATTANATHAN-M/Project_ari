@@ -22,15 +22,66 @@ function getInternalLinks(baseUrl, links) {
   return [...set];
 }
 
+// Helper to get line/column of element in DOM
+// Helper to approximate line/column in the DOM
+// Helper to get a unique CSS path and approximate line/column
+async function getNodeLocation(page, selector) {
+  return await page.evaluate((sel) => {
+    const el = document.querySelector(sel);
+    if (!el) return { line: null, column: null, path: null };
+
+    // Generate a unique CSS path for the element
+    function cssPath(element) {
+      if (!(element instanceof Element)) return '';
+      const path = [];
+      while (element.nodeType === Node.ELEMENT_NODE) {
+        let selector = element.nodeName.toLowerCase();
+        if (element.id) selector += `#${element.id}`;
+        else {
+          const sib = Array.from(element.parentNode.children).filter(
+            (s) => s.nodeName === element.nodeName
+          );
+          if (sib.length > 1) {
+            selector += `:nth-of-type(${Array.from(element.parentNode.children).indexOf(element) + 1})`;
+          }
+        }
+        path.unshift(selector);
+        element = element.parentNode;
+      }
+      return path.join(' > ');
+    }
+
+    // Approximate line/column: find element's outerHTML position in document
+    const html = document.documentElement.outerHTML;
+    const outer = el.outerHTML;
+    const index = html.indexOf(outer);
+    let line = null, column = null;
+    if (index !== -1) {
+      const linesUpTo = html.slice(0, index).split("\n");
+      line = linesUpTo.length;
+      column = linesUpTo[linesUpTo.length - 1].length + 1;
+    }
+
+    return {
+      line,
+      column,
+      path: cssPath(el),
+    };
+  }, selector);
+}
+
+
+
 /**
  * startCrawler
  * @param {string} startUrl
  * @param {number} concurrency
  * @param {function} onProgress optional callback({ current, total, errors })
+ * @param {boolean} singlePage whether to crawl only the start URL
  */
-async function startCrawler(startUrl, concurrency = 4, onProgress) {
+async function startCrawler(startUrl, concurrency = 4, onProgress, singlePage = false) {
   const visited = new Set();
-  const inProgress = new Set(); // tracks URLs being crawled
+  const inProgress = new Set();
   const results = [];
   let pagesCrawled = 0;
   let errors = 0;
@@ -45,7 +96,7 @@ async function startCrawler(startUrl, concurrency = 4, onProgress) {
     timeout: 90 * 1000,
     puppeteerOptions: {
       headless: true,
-      args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
+      args: ["--no-sandbox", "--disable-setuid-sandbox"],
       defaultViewport: { width: 1366, height: 768 },
     },
   });
@@ -55,14 +106,11 @@ async function startCrawler(startUrl, concurrency = 4, onProgress) {
       inProgress.add(url);
       totalQueued++;
       cluster.queue({ url });
-      // Update progress whenever a new URL is queued
-      if (onProgress) {
-        onProgress({ current: pagesCrawled, total: totalQueued, errors });
-      }
+      if (onProgress) onProgress({ current: pagesCrawled, total: totalQueued, errors });
     }
   };
 
-  await cluster.task(async ({ page, data }) => {
+  cluster.task(async ({ page, data }) => {
     const { url } = data;
     visited.add(url);
 
@@ -75,21 +123,15 @@ async function startCrawler(startUrl, concurrency = 4, onProgress) {
     try {
       await page.setRequestInterception(true);
       page.on("request", (req) => {
-        if (["image", "media", "font", "stylesheet"].includes(req.resourceType()))
-          req.abort();
+        if (["image", "media", "font", "stylesheet"].includes(req.resourceType())) req.abort();
         else req.continue();
       });
 
-      await page.setUserAgent(
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-      );
-      await page.setExtraHTTPHeaders({ "Accept-Language": "en-US,en;q=0.9" });
+      await page.setUserAgent("Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
       page.setDefaultNavigationTimeout(60000);
 
       let resp = await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
 
-      // SPA retry for 404
       if (resp && typeof resp.status === "function" && resp.status() >= 400) {
         await page.goto(startUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
         await page.evaluate((spaPath) => {
@@ -102,15 +144,15 @@ async function startCrawler(startUrl, concurrency = 4, onProgress) {
 
       await page.waitForFunction(() => document.readyState === "complete", { timeout: 60000 });
       await page.waitForSelector("body", { timeout: 60000 });
-      await sleep(2000);
+      await sleep(1500);
 
       title = await page.title().catch(() => null);
       const hrefs = await page.$$eval("a[href]", (as) => as.map((a) => a.getAttribute("href"))).catch(() => []);
       internalLinks = getInternalLinks(url, hrefs);
 
-      for (const link of internalLinks) queueUrl(link);
+      if (!singlePage) internalLinks.forEach(queueUrl);
 
-      // AXE Analysis
+      // --- AXE analysis
       let axeResults;
       for (let attempt = 1; attempt <= 3; attempt++) {
         try {
@@ -118,7 +160,7 @@ async function startCrawler(startUrl, concurrency = 4, onProgress) {
           break;
         } catch (e) {
           if (attempt === 3) throw e;
-          await sleep(2000);
+          await sleep(1500);
         }
       }
 
@@ -129,17 +171,34 @@ async function startCrawler(startUrl, concurrency = 4, onProgress) {
         inapplicable: axeResults.inapplicable?.length || 0,
       };
 
-      violations = (axeResults.violations || []).map((v) => ({
-        id: v.id,
-        impact: v.impact,
-        description: v.description,
-        helpUrl: v.helpUrl,
-        nodes: (v.nodes || []).slice(0, 5).map((n) => ({
-          target: n.target,
-          html: n.html,
-          failureSummary: n.failureSummary,
-        })),
-      }));
+      // --- Map violations with line/column
+      violations = await Promise.all(
+        (axeResults.violations || []).map(async (v) => {
+          const nodes = await Promise.all(
+            (v.nodes || []).slice(0, 5).map(async (n) => {
+              let location = { line: null, column: null };
+              try {
+                if (n.target?.[0]) {
+                  location = await getNodeLocation(page, n.target[0]);
+                }
+              } catch {}
+              return {
+                target: n.target,
+                html: n.html,
+                failureSummary: n.failureSummary,
+                location,
+              };
+            })
+          );
+          return {
+            id: v.id,
+            impact: v.impact,
+            description: v.description,
+            helpUrl: v.helpUrl,
+            nodes,
+          };
+        })
+      );
 
       console.log(`✅ ${url} → ${counts.violations} violations`);
     } catch (e) {
@@ -151,14 +210,13 @@ async function startCrawler(startUrl, concurrency = 4, onProgress) {
       inProgress.delete(url);
       results.push({ url, title, links: internalLinks, counts, violations, error });
 
-      // Progress update
-      if (onProgress) {
-        onProgress({ current: pagesCrawled, total: totalQueued, errors });
-      }
+      if (onProgress) onProgress({ current: pagesCrawled, total: totalQueued, errors });
+
+      console.log(`[${pagesCrawled}/${totalQueued}] Workers: ${cluster.workers.map(w => w.idle ? "IDLE" : "BUSY").join(", ")}`);
     }
   });
 
-  cluster.queue({ url: startUrl });
+  queueUrl(startUrl);
   await cluster.idle();
   await cluster.close();
 

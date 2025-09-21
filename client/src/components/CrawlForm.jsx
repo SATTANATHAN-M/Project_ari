@@ -8,7 +8,11 @@ export default function CrawlForm({ url, setUrl, handleCrawl, loading }) {
         onChange={(e) => setUrl(e.target.value)}
         style={{ flex: 1, padding: "0.5rem" }}
       />
-      <button onClick={handleCrawl} disabled={loading} style={{ padding: "0.5rem 1rem" }}>
+      <button
+        onClick={handleCrawl}
+        disabled={loading}
+        style={{ padding: "0.5rem 1rem" }}
+      >
         {loading ? "Scanning..." : "Crawl"}
       </button>
     </div>

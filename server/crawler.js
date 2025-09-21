@@ -22,10 +22,19 @@ function getInternalLinks(baseUrl, links) {
   return [...set];
 }
 
-async function startCrawler(startUrl, concurrency = 4) {
+/**
+ * startCrawler
+ * @param {string} startUrl
+ * @param {number} concurrency
+ * @param {function} onProgress optional callback({ current, total, errors })
+ */
+async function startCrawler(startUrl, concurrency = 4, onProgress) {
   const visited = new Set();
+  const inProgress = new Set(); // tracks URLs being crawled
   const results = [];
   let pagesCrawled = 0;
+  let errors = 0;
+  let totalQueued = 0;
 
   const cluster = await Cluster.launch({
     puppeteer,
@@ -34,22 +43,27 @@ async function startCrawler(startUrl, concurrency = 4) {
     retryLimit: 2,
     retryDelay: 1500,
     timeout: 90 * 1000,
-    monitor: true,
     puppeteerOptions: {
       headless: true,
-      args: [
-        "--no-sandbox",
-        "--disable-setuid-sandbox",
-        "--disable-dev-shm-usage",
-        "--disable-gpu",
-      ],
+      args: ["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage", "--disable-gpu"],
       defaultViewport: { width: 1366, height: 768 },
     },
   });
 
+  const queueUrl = (url) => {
+    if (!visited.has(url) && !inProgress.has(url)) {
+      inProgress.add(url);
+      totalQueued++;
+      cluster.queue({ url });
+      // Update progress whenever a new URL is queued
+      if (onProgress) {
+        onProgress({ current: pagesCrawled, total: totalQueued, errors });
+      }
+    }
+  };
+
   await cluster.task(async ({ page, data }) => {
     const { url } = data;
-    if (!url || visited.has(url)) return;
     visited.add(url);
 
     let title = null;
@@ -68,57 +82,39 @@ async function startCrawler(startUrl, concurrency = 4) {
 
       await page.setUserAgent(
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-          "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
       );
       await page.setExtraHTTPHeaders({ "Accept-Language": "en-US,en;q=0.9" });
       page.setDefaultNavigationTimeout(60000);
 
-      let resp = await page.goto(url, {
-        waitUntil: "domcontentloaded",
-        timeout: 60000,
-      });
+      let resp = await page.goto(url, { waitUntil: "domcontentloaded", timeout: 60000 });
 
-      // If 404 on React route → retry from homepage with SPA navigation
+      // SPA retry for 404
       if (resp && typeof resp.status === "function" && resp.status() >= 400) {
-        console.warn(`⚠️ ${url} returned ${resp.status()} → retrying via SPA`);
-
-        // Load homepage first
-        await page.goto(startUrl, {
-          waitUntil: "domcontentloaded",
-          timeout: 60000,
-        });
-
-        // Use client-side navigation
+        await page.goto(startUrl, { waitUntil: "domcontentloaded", timeout: 60000 });
         await page.evaluate((spaPath) => {
           history.pushState({}, "", spaPath);
           window.dispatchEvent(new Event("popstate"));
         }, new URL(url).pathname);
-
         await page.waitForSelector("body", { timeout: 10000 });
         await sleep(1500);
       }
 
-      await page.waitForFunction(
-        () => document.readyState === "complete",
-        { timeout: 60000 }
-      );
+      await page.waitForFunction(() => document.readyState === "complete", { timeout: 60000 });
       await page.waitForSelector("body", { timeout: 60000 });
       await sleep(2000);
 
       title = await page.title().catch(() => null);
-      const hrefs = await page
-        .$$eval("a[href]", (as) => as.map((a) => a.getAttribute("href")))
-        .catch(() => []);
+      const hrefs = await page.$$eval("a[href]", (as) => as.map((a) => a.getAttribute("href"))).catch(() => []);
       internalLinks = getInternalLinks(url, hrefs);
 
-      for (const link of internalLinks)
-        if (!visited.has(link)) cluster.queue({ url: link });
+      for (const link of internalLinks) queueUrl(link);
 
+      // AXE Analysis
       let axeResults;
       for (let attempt = 1; attempt <= 3; attempt++) {
         try {
-          const axe = new AxePuppeteer(page).options({ iframes: false });
-          axeResults = await axe.analyze();
+          axeResults = await new AxePuppeteer(page).options({ iframes: false }).analyze();
           break;
         } catch (e) {
           if (attempt === 3) throw e;
@@ -149,30 +145,17 @@ async function startCrawler(startUrl, concurrency = 4) {
     } catch (e) {
       error = e?.message || String(e);
       console.error(`❌ ${url}: ${error}`);
+      errors++;
     } finally {
       pagesCrawled++;
-      results.push({
-        url,
-        title,
-        links: internalLinks,
-        counts,
-        violations,
-        error: error || undefined,
-      });
-    }
-  });
+      inProgress.delete(url);
+      results.push({ url, title, links: internalLinks, counts, violations, error });
 
-  cluster.on("taskerror", (err, data) => {
-    const url = data?.url || "(unknown URL)";
-    console.error(`Error crawling ${url}: ${err.message}`);
-    results.push({
-      url,
-      title: null,
-      links: [],
-      counts: { violations: 0, passes: 0, incomplete: 0, inapplicable: 0 },
-      violations: [],
-      error: err.message,
-    });
+      // Progress update
+      if (onProgress) {
+        onProgress({ current: pagesCrawled, total: totalQueued, errors });
+      }
+    }
   });
 
   cluster.queue({ url: startUrl });

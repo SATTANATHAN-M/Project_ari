@@ -2,6 +2,7 @@ import React, { useState } from "react";
 import CrawlForm from "./components/CrawlForm";
 import ResultsTable from "./components/ResultsTable";
 import ReportViewer from "./components/ReportViewer";
+import ScoreCard from "./components/ScoreCard"; // ⬅️ import ScoreCard
 import axios from "axios";
 
 export default function App() {
@@ -25,11 +26,20 @@ export default function App() {
   };
 
   return (
-    <div style={{ padding: 20 }}>
+    <div style={{ padding: 20, maxWidth: 800, margin: "0 auto" }}>
       <h1>Accessibility Crawler</h1>
-      <CrawlForm url={url} setUrl={setUrl} handleCrawl={handleCrawl} loading={loading} />
+      <CrawlForm
+        url={url}
+        setUrl={setUrl}
+        handleCrawl={handleCrawl}
+        loading={loading}
+      />
       {loading && <p>Scanning...</p>}
       {result?.error && <p style={{ color: "red" }}>{result.error}</p>}
+
+      {/* Show ScoreCard if we have pages */}
+      {result && result.pages && <ScoreCard pages={result.pages} />}
+
       {result && !result.error && (
         <>
           <ReportViewer pdfPath={result.pdfPath} />

@@ -36,5 +36,35 @@ async function generatePDFReport(pages, outputPath) {
   doc.end();
   return outputPath;
 }
+// backend/report.js (append this)
+async function generateEslintPDF(eslintResults, outputPath) {
+  const dir = path.dirname(outputPath);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 
-module.exports = { generatePDFReport };
+  const doc = new PDFDocument({ margin: 30 });
+  doc.pipe(fs.createWriteStream(outputPath));
+
+  doc.fontSize(20).text("ESLint Accessibility Report", { underline: true });
+  doc.moveDown();
+
+  eslintResults.forEach((file) => {
+    doc.fontSize(14).text(file.filePath);
+    if (file.messages.length === 0) {
+      doc.fontSize(12).fillColor("green").text("✅ No issues").fillColor("black");
+    } else {
+      file.messages.forEach((msg) => {
+        doc.fontSize(12)
+          .fillColor("red")
+          .text(`Line ${msg.line}, Col ${msg.column}: ${msg.message} (${msg.ruleId})`)
+          .fillColor("black");
+      });
+    }
+    doc.moveDown();
+  });
+
+  doc.end();
+  return outputPath;
+}
+
+module.exports = { generatePDFReport, generateEslintPDF };
+

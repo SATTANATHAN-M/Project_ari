@@ -1,3 +1,4 @@
+require("dotenv").config();
 const express = require("express");
 const cors = require("cors");
 const path = require("path");
@@ -7,11 +8,13 @@ const AdmZip = require("adm-zip");
 const fs = require("fs");
 const { runLint } = require("./lint");
 
+
 const upload = multer({ dest: "uploads/" });
 const app = express();
 
 app.use(cors());
 app.use(express.json());
+
 app.use("/reports", express.static(path.join(__dirname, "reports")));
 
 // ==================== ZIP Upload & Lint Endpoint ====================
